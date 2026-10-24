@@ -1,4 +1,4 @@
-const CACHE = 'meu-treino-v3';
+const CACHE = 'meu-treino-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -34,4 +34,8 @@ self.addEventListener('fetch', e => {
       }).catch(() => cached);
     })
   );
+});
+
+self.addEventListener('message', e => {
+  if (e.data?.action === 'SKIP_WAITING') self.skipWaiting();
 });

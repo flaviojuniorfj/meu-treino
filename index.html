@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Meu Treino - Flavão</title>
 
-    <!-- PWA -->
     <link rel="manifest" href="manifest.json">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,7 +12,6 @@
     <meta name="theme-color" content="#0f172a">
     <link rel="apple-touch-icon" href="icon-192.png">
 
-    <!-- Tailwind -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -71,8 +69,12 @@
                 <p class="text-xs text-slate-400" id="current-workout-name">Treino do Flavão</p>
             </div>
         </div>
-        <div class="flex items-center gap-2">
-            <button onclick="openWeightModal()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5 transition border border-slate-700">
+        <div class="flex items-center gap-1.5">
+            <button onclick="toggleSessionTimer()" id="session-timer-btn" title="Cronômetro de sessão" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-mono font-semibold flex items-center gap-1 transition border border-slate-700">
+                <i class="fa-solid fa-stopwatch text-amber-400 text-[11px]"></i>
+                <span id="session-timer-display">00:00</span>
+            </button>
+            <button onclick="openWeightModal()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center gap-1.5 transition border border-slate-700">
                 <i class="fa-solid fa-weight-scale text-brand-500"></i>
                 <span id="header-weight-display">-- kg</span>
             </button>
@@ -84,7 +86,22 @@
 
     <main class="flex-1 max-w-2xl w-full mx-auto p-4 space-y-4">
 
-        <!-- Banner de treino não concluído -->
+        <!-- Import escondido -->
+        <input type="file" id="xlsx-file-input" accept=".xlsx, .xls" class="hidden" onchange="handleXlsxImport(event)">
+
+        <!-- Banner de atualização PWA -->
+        <div id="update-banner" class="hidden bg-cyan-500/10 border border-cyan-500/40 rounded-2xl p-3 flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-cyan-500/20 text-cyan-400 flex items-center justify-center flex-shrink-0">
+                <i class="fa-solid fa-cloud-arrow-down"></i>
+            </div>
+            <div class="flex-1">
+                <p class="text-xs font-semibold text-cyan-300">Nova versão disponível</p>
+                <p class="text-[11px] text-slate-400">Recarregue para atualizar</p>
+            </div>
+            <button onclick="reloadForUpdate()" class="text-xs font-bold text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 px-2.5 py-1.5 rounded-lg border border-cyan-500/30">Atualizar</button>
+        </div>
+
+        <!-- Banner treino não concluído -->
         <div id="unfinished-banner" class="hidden bg-amber-500/10 border border-amber-500/40 rounded-2xl p-3 flex items-center gap-3">
             <div class="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center flex-shrink-0">
                 <i class="fa-solid fa-triangle-exclamation"></i>
@@ -96,16 +113,13 @@
             <button onclick="goToUnfinishedDay()" class="text-xs font-bold text-amber-400 hover:text-amber-300 bg-amber-500/10 px-2.5 py-1.5 rounded-lg border border-amber-500/30">Ver</button>
         </div>
 
-        <!-- Import escondido — acionado pelo menu de configurações -->
-        <input type="file" id="xlsx-file-input" accept=".xlsx, .xls" class="hidden" onchange="handleXlsxImport(event)">
-
-        <!-- Busca global -->
+        <!-- Busca -->
         <div class="relative">
             <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
             <input type="text" id="global-search" placeholder="Buscar exercício em todos os dias..." oninput="handleGlobalSearch(this.value)" class="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-brand-500">
         </div>
 
-        <!-- Resultados de busca -->
+        <!-- Resultados busca -->
         <div id="search-results" class="hidden bg-slate-900 border border-slate-800 rounded-2xl p-3 space-y-2"></div>
 
         <!-- Tabs -->
@@ -165,7 +179,7 @@
         </div>
     </main>
 
-    <!-- Timer de descanso flutuante -->
+    <!-- Timer descanso -->
     <div id="rest-timer" class="hidden fixed bottom-24 left-1/2 -translate-x-1/2 z-40 bg-slate-900 border border-brand-500/50 rounded-2xl shadow-2xl shadow-brand-500/20 px-4 py-3 flex items-center gap-3 min-w-[240px]">
         <div class="relative w-10 h-10 rounded-full bg-brand-500/20 flex items-center justify-center flex-shrink-0" id="timer-circle">
             <i class="fa-solid fa-hourglass-half text-brand-500 text-sm"></i>
@@ -197,20 +211,15 @@
                     <i class="fa-solid fa-clock-rotate-left text-purple-400 text-lg"></i>
                     <div><div class="font-semibold text-sm">Histórico de Treinos</div><div class="text-xs text-slate-400">Sessões e streak</div></div>
                 </button>
-                <!-- NOVO: Importar planilha -->
                 <label class="cursor-pointer w-full text-left p-3 rounded-xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 flex items-center gap-3 text-slate-200 transition">
                     <i class="fa-solid fa-file-excel text-emerald-400 text-lg"></i>
                     <div><div class="font-semibold text-sm">Importar Treino (.xlsx)</div><div class="text-xs text-slate-400">Substituir treino por planilha</div></div>
                     <input type="file" accept=".xlsx, .xls" class="hidden" onchange="handleXlsxImport(event)">
                 </label>
-
-                <!-- NOVO: Exportar planilha -->
                 <button onclick="exportToXlsx(); toggleSettingsMenu();" class="w-full text-left p-3 rounded-xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 flex items-center gap-3 text-slate-200 transition">
                     <i class="fa-solid fa-file-export text-emerald-400 text-lg"></i>
                     <div><div class="font-semibold text-sm">Exportar Treino (.xlsx)</div><div class="text-xs text-slate-400">Baixar planilha com treino atual</div></div>
                 </button>
-
-                <!-- NOVO: Baixar modelo -->
                 <button onclick="downloadTemplateXlsx(); toggleSettingsMenu();" class="w-full text-left p-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 flex items-center gap-3 text-amber-300 transition">
                     <i class="fa-solid fa-file-arrow-down text-amber-400 text-lg"></i>
                     <div><div class="font-semibold text-sm">Baixar Modelo de Planilha</div><div class="text-xs text-amber-300/70">Planilha exemplo com instruções</div></div>
@@ -257,33 +266,59 @@
         </div>
     </div>
 
-    <!-- MODAL Carga -->
+    <!-- MODAL Carga (com RIR + aquecimento) -->
     <div id="load-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
-        <div class="bg-slate-900 border border-slate-800 w-full max-w-sm rounded-2xl p-5 space-y-3 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div class="bg-slate-900 border border-slate-800 w-full max-w-sm rounded-2xl p-5 space-y-3 shadow-2xl max-h-[92vh] overflow-y-auto">
             <div class="flex justify-between items-center border-b border-slate-800 pb-2">
                 <h3 class="font-bold text-slate-200 flex items-center gap-2"><i class="fa-solid fa-dumbbell text-brand-500"></i> Registrar Carga</h3>
                 <button onclick="closeLoadModal()" class="p-1 text-slate-400 hover:text-slate-100"><i class="fa-solid fa-xmark text-lg"></i></button>
             </div>
             <p id="load-modal-exercise-name" class="text-sm text-slate-300 font-semibold"></p>
-            <div class="space-y-2">
+
+            <!-- Carga -->
+            <div class="space-y-1.5">
                 <label class="block text-xs font-medium text-slate-400">Carga usada (kg):</label>
                 <input type="number" step="0.5" id="load-input" placeholder="Ex: 40" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-slate-100 focus:outline-none focus:border-brand-500 font-mono text-center text-lg">
             </div>
-            <div class="space-y-2">
+
+            <!-- RIR -->
+            <div class="space-y-1.5">
+                <label class="block text-xs font-medium text-slate-400 flex items-center justify-between">
+                    <span>RIR (reps na reserva):</span>
+                    <button onclick="showRirHelp()" class="text-[10px] text-brand-400 hover:text-brand-300 underline">o que é?</button>
+                </label>
+                <div id="rir-selector" class="grid grid-cols-4 gap-1.5">
+                    <button type="button" data-rir="0" onclick="selectRIR(0)" class="rir-btn py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 text-sm font-mono hover:border-rose-500/50 transition">0</button>
+                    <button type="button" data-rir="1" onclick="selectRIR(1)" class="rir-btn py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 text-sm font-mono hover:border-amber-500/50 transition">1</button>
+                    <button type="button" data-rir="2" onclick="selectRIR(2)" class="rir-btn py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 text-sm font-mono hover:border-amber-400/50 transition">2</button>
+                    <button type="button" data-rir="3" onclick="selectRIR(3)" class="rir-btn py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 text-sm font-mono hover:border-brand-500/50 transition">3+</button>
+                </div>
+                <p id="rir-hint" class="text-[10px] text-slate-500 text-center">0 = falha total • 3+ = sobrou muito</p>
+            </div>
+
+            <!-- Aquecimento -->
+            <div class="border-t border-slate-800 pt-2">
+                <button type="button" onclick="toggleWarmup()" class="w-full text-left text-xs text-slate-400 hover:text-slate-200 flex items-center justify-between transition">
+                    <span class="flex items-center gap-1.5"><i class="fa-solid fa-fire text-orange-400"></i> Sugestão de aquecimento</span>
+                    <i class="fa-solid fa-chevron-down text-[10px]"></i>
+                </button>
+                <div id="warmup-container" class="hidden mt-2 bg-slate-950 border border-slate-800 rounded-xl p-2 space-y-1 text-[11px]"></div>
+            </div>
+
+            <!-- Observação -->
+            <div class="space-y-1.5 border-t border-slate-800 pt-2">
                 <label class="block text-xs font-medium text-slate-400">Observação (opcional):</label>
                 <input type="text" id="load-note-input" placeholder="Ex: falhei na última série" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-brand-500 text-sm">
             </div>
+
+            <!-- Meta -->
             <div class="border-t border-slate-800 pt-2 space-y-1">
                 <label class="block text-xs font-medium text-slate-400">Meta (kg) — opcional:</label>
                 <input type="number" step="0.5" id="load-goal-input" placeholder="Ex: 60" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-brand-500 font-mono text-sm text-center">
-                <div id="load-goal-progress" class="hidden mt-1">
-                    <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                        <div class="bg-cyan-500 h-1.5 rounded-full transition-all" style="width:0%" id="load-goal-bar"></div>
-                    </div>
-                    <p class="text-[10px] text-slate-500 text-center mt-1" id="load-goal-text"></p>
-                </div>
             </div>
+
             <div id="load-history-list" class="max-h-32 overflow-y-auto space-y-1 text-xs text-slate-400 pr-1 border-t border-slate-800 pt-2"></div>
+
             <div class="flex gap-2">
                 <button onclick="closeLoadModal()" class="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-sm font-medium transition">Cancelar</button>
                 <button onclick="saveLoad()" class="flex-1 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-sm font-bold transition">Salvar</button>

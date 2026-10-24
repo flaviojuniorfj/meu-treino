@@ -1,6 +1,7 @@
 /* =========================================================
-   MEU TREINO - Flavão Edition  v3
-   Todas as melhorias implementadas
+   MEU TREINO - Flavão Edition  v4.1
+   Fase 2: RIR + Cronômetro + Aquecimento + Deload + PWA auto-update
+   Correção: renderCurrentDay defensivo
    ========================================================= */
 
 // ============ DEFAULT WORKOUT ============
@@ -58,9 +59,20 @@ let activeDayIndex = 0;
 let editingDayBackup = null;
 let editingExerciseName = null;
 
-// Timer
+// Timer descanso
 let restTimerInterval = null;
 let restTimerEnd = null;
+
+// Timer sessão
+let sessionStartTime = null;
+let sessionTimerInterval = null;
+
+// RIR
+let currentRIR = null;
+
+// Service worker
+let swRegistration = null;
+let waitingWorker = null;
 
 // ============ INIT ============
 window.addEventListener('load', () => {
@@ -76,24 +88,57 @@ window.addEventListener('load', () => {
     renderWeeklySummary();
     checkUnfinishedDay();
     registerServiceWorker();
+    initSessionTimer();
 });
 
 // ============ MIGRATION ============
 function migrate() {
     const v = parseInt(localStorage.getItem('meu_treino_version') || '1');
     if (v < 3) {
-        // v3 adicionou loadGoals, trainingHistory, sessionNotes
         if (!localStorage.getItem('meu_treino_load_goals')) localStorage.setItem('meu_treino_load_goals', '{}');
         if (!localStorage.getItem('meu_treino_training_history')) localStorage.setItem('meu_treino_training_history', '[]');
         if (!localStorage.getItem('meu_treino_session_notes')) localStorage.setItem('meu_treino_session_notes', '{}');
-        localStorage.setItem('meu_treino_version', '3');
     }
+    localStorage.setItem('meu_treino_version', '4');
 }
 
 // ============ SERVICE WORKER ============
 function registerServiceWorker() {
-    if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW falhou:', err));
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('./sw.js').then(reg => {
+        swRegistration = reg;
+        if (reg.waiting) { waitingWorker = reg.waiting; showUpdateBanner(); }
+        reg.addEventListener('updatefound', () => {
+            const nw = reg.installing;
+            if (!nw) return;
+            nw.addEventListener('statechange', () => {
+                if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+                    waitingWorker = nw;
+                    showUpdateBanner();
+                }
+            });
+        });
+        setInterval(() => { reg.update().catch(() => {}); }, 60 * 60 * 1000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) reg.update().catch(() => {});
+        });
+    }).catch(err => console.warn('SW falhou:', err));
+
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (window._reloadingForUpdate) window.location.reload();
+    });
+}
+
+function showUpdateBanner() {
+    const b = document.getElementById('update-banner');
+    if (b) b.classList.remove('hidden');
+}
+function reloadForUpdate() {
+    if (waitingWorker) {
+        window._reloadingForUpdate = true;
+        waitingWorker.postMessage({ action: 'SKIP_WAITING' });
+    } else {
+        window.location.reload();
     }
 }
 
@@ -128,6 +173,13 @@ function loadAll() {
     const sn = localStorage.getItem('meu_treino_session_notes');
     sessionNotes = sn ? safeParse(sn, {}) : {};
 
+    // Garante estrutura mínima
+    if (!Array.isArray(currentWorkout) || currentWorkout.length === 0) {
+        currentWorkout = clone(DEFAULT_WORKOUT_FLAVAO);
+    }
+    if (!loadHistory || typeof loadHistory !== 'object') loadHistory = {};
+    if (!loadGoals || typeof loadGoals !== 'object') loadGoals = {};
+
     updateWeightDisplay();
 }
 function saveWorkoutData() { safeSet('meu_treino_workout_data', currentWorkout); }
@@ -141,6 +193,7 @@ function saveSessionNotes() { safeSet('meu_treino_session_notes', sessionNotes);
 // ============ RENDER ============
 function renderDayTabs() {
     const c = document.getElementById('day-tabs');
+    if (!c) return;
     c.innerHTML = '';
     currentWorkout.forEach((d, idx) => {
         const btn = document.createElement('button');
@@ -159,20 +212,29 @@ function renderDayTabs() {
     });
 }
 
+// ⭐ VERSÃO CORRIGIDA E DEFENSIVA
 function renderCurrentDay() {
     const day = currentWorkout[activeDayIndex];
     if (!day) return;
-    document.getElementById('day-title').innerText = day.day;
-    document.getElementById('day-focus').innerText = `Foco: ${day.focus || '—'}`;
+
+    const titleEl = document.getElementById('day-title');
+    const focusEl = document.getElementById('day-focus');
+    if (titleEl) titleEl.innerText = day.day || '—';
+    if (focusEl) focusEl.innerText = `Foco: ${day.focus || '—'}`;
 
     const list = document.getElementById('exercise-list');
     const rest = document.getElementById('rest-day-container');
+    if (!list || !rest) {
+        console.error('Elementos #exercise-list ou #rest-day-container não encontrados no HTML');
+        return;
+    }
     list.innerHTML = '';
 
-    if (day.isRest || !day.exercises || !day.exercises.length) {
+    if (day.isRest || !Array.isArray(day.exercises) || !day.exercises.length) {
         list.classList.add('hidden');
         rest.classList.remove('hidden');
-        document.getElementById('rest-day-text').innerText = day.restInfo || 'Dia de descanso.';
+        const restText = document.getElementById('rest-day-text');
+        if (restText) restText.innerText = day.restInfo || 'Dia de descanso.';
         updateProgressBar(0, 0);
         return;
     }
@@ -181,65 +243,91 @@ function renderCurrentDay() {
 
     let done = 0;
     day.exercises.forEach((ex, exIdx) => {
-        const key = `${activeDayIndex}_${exIdx}`;
-        const checked = !!completedState[key];
-        if (checked) done++;
+        try {
+            if (!ex || typeof ex !== 'object') {
+                console.warn('Exercício inválido no índice', exIdx, ex);
+                return;
+            }
 
-        const lastLoad = getLastLoad(ex.name);
-        const goal = loadGoals[ex.name];
-        const progression = getProgressionSuggestion(ex.name);
+            const key = `${activeDayIndex}_${exIdx}`;
+            const checked = !!completedState[key];
+            if (checked) done++;
 
-        let badges = '';
-        if (lastLoad) {
-            badges += `<span class="bg-cyan-500/10 text-cyan-300 px-2 py-0.5 rounded-md border border-cyan-500/30 font-mono"><i class="fa-solid fa-fire-flame-curved mr-1"></i>${lastLoad.load}kg <span class="text-[10px] opacity-70">${lastLoad.date}</span></span>`;
-        } else {
-            badges += `<span class="bg-slate-800/60 text-slate-500 px-2 py-0.5 rounded-md border border-slate-700/50 italic">sem carga reg.</span>`;
-        }
-        if (goal) {
-            const pct = Math.min(100, Math.round((lastLoad?.load || 0) / goal * 100));
-            badges += `<span class="bg-purple-500/10 text-purple-300 px-2 py-0.5 rounded-md border border-purple-500/30 font-mono"><i class="fa-solid fa-bullseye mr-1"></i>${pct}% meta</span>`;
-        }
-        if (progression) {
-            badges += `<span class="bg-amber-500/10 text-amber-300 px-2 py-0.5 rounded-md border border-amber-500/30 font-mono text-[10px]"><i class="fa-solid fa-arrow-trend-up mr-1"></i>Sugerido: ${progression.suggested}kg</span>`;
-        }
+            // Sanitização: protege contra undefined/null em qualquer campo
+            const exName = String(ex.name || 'Exercício sem nome');
+            const exSeries = String(ex.series ?? '3');
+            const exReps = String(ex.reps ?? '10–12');
+            const exRest = String(ex.rest ?? '60–90s');
 
-        const card = document.createElement('div');
-        card.className = `bg-slate-900 border ${checked ? 'border-brand-500/40 bg-brand-500/5' : 'border-slate-800'} rounded-2xl p-4 transition duration-200 shadow-sm`;
-        const ytQuery = encodeURIComponent(`como fazer ${ex.name} execucao correta`);
+            // Cada uma dessas chamadas isolada, pra uma falhar e não derrubar as outras
+            let lastLoad = null, goal = null, progression = null, deload = false;
+            try { lastLoad = getLastLoad(exName); } catch(e) { console.warn('getLastLoad:', e); }
+            try { goal = loadGoals[exName]; } catch(e) {}
+            try { progression = getProgressionSuggestion(exName); } catch(e) { console.warn('progression:', e); }
+            try { deload = getDeloadWarning(exName); } catch(e) { console.warn('deload:', e); }
 
-        card.innerHTML = `
-            <div class="flex items-start justify-between gap-3">
-                <label class="flex items-start gap-3 cursor-pointer flex-1">
-                    <div class="relative mt-0.5">
-                        <input type="checkbox" class="checkbox-custom sr-only" ${checked?'checked':''} onchange="toggleExercise('${key}')">
-                        <div class="w-6 h-6 rounded-lg border-2 border-slate-700 bg-slate-950 flex items-center justify-center transition">
-                            <i class="fa-solid fa-check text-xs text-slate-950 hidden font-bold"></i>
+            let badges = '';
+            if (lastLoad && typeof lastLoad.load === 'number') {
+                const rirTxt = (lastLoad.rir !== undefined && lastLoad.rir !== null)
+                    ? ` · RIR ${lastLoad.rir >= 3 ? '3+' : lastLoad.rir}` : '';
+                badges += `<span class="bg-cyan-500/10 text-cyan-300 px-2 py-0.5 rounded-md border border-cyan-500/30 font-mono"><i class="fa-solid fa-fire-flame-curved mr-1"></i>${lastLoad.load}kg${rirTxt} <span class="text-[10px] opacity-70">${escapeHtml(lastLoad.date || '')}</span></span>`;
+            } else {
+                badges += `<span class="bg-slate-800/60 text-slate-500 px-2 py-0.5 rounded-md border border-slate-700/50 italic">sem carga reg.</span>`;
+            }
+            if (goal) {
+                const lastW = (lastLoad && typeof lastLoad.load === 'number') ? lastLoad.load : 0;
+                const pct = Math.min(100, Math.round((lastW / goal) * 100));
+                badges += `<span class="bg-purple-500/10 text-purple-300 px-2 py-0.5 rounded-md border border-purple-500/30 font-mono"><i class="fa-solid fa-bullseye mr-1"></i>${pct}% meta</span>`;
+            }
+            if (progression && progression.suggested) {
+                badges += `<span class="bg-amber-500/10 text-amber-300 px-2 py-0.5 rounded-md border border-amber-500/30 font-mono text-[10px]"><i class="fa-solid fa-arrow-trend-up mr-1"></i>${progression.suggested}kg</span>`;
+            }
+            if (deload) {
+                badges += `<span class="bg-rose-500/10 text-rose-300 px-2 py-0.5 rounded-md border border-rose-500/30 font-mono text-[10px]"><i class="fa-solid fa-triangle-exclamation mr-1"></i>deload</span>`;
+            }
+
+            const card = document.createElement('div');
+            card.className = `bg-slate-900 border ${checked ? 'border-brand-500/40 bg-brand-500/5' : 'border-slate-800'} rounded-2xl p-4 transition duration-200 shadow-sm`;
+
+            const ytQuery = encodeURIComponent(`como fazer ${exName} execucao correta`);
+            const restSeconds = parseRest(exRest);
+
+            card.innerHTML = `
+                <div class="flex items-start justify-between gap-3">
+                    <label class="flex items-start gap-3 cursor-pointer flex-1">
+                        <div class="relative mt-0.5">
+                            <input type="checkbox" class="checkbox-custom sr-only" ${checked?'checked':''} onchange="toggleExercise('${key}')">
+                            <div class="w-6 h-6 rounded-lg border-2 border-slate-700 bg-slate-950 flex items-center justify-center transition">
+                                <i class="fa-solid fa-check text-xs text-slate-950 hidden font-bold"></i>
+                            </div>
                         </div>
-                    </div>
-                    <div class="space-y-1">
-                        <h4 class="font-bold text-sm sm:text-base leading-snug ${checked?'line-through text-slate-400':'text-slate-100'}">${escapeHtml(ex.name)}</h4>
-                        <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono">
-                            <span class="bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700/50"><b class="text-brand-400">${ex.series}</b> séries</span>
-                            <span class="bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700/50"><b class="text-brand-400">${ex.reps}</b> reps</span>
-                            <span class="bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700/50"><i class="fa-regular fa-clock mr-1"></i>${ex.rest}</span>
-                            ${badges}
+                        <div class="space-y-1">
+                            <h4 class="font-bold text-sm sm:text-base leading-snug ${checked?'line-through text-slate-400':'text-slate-100'}">${escapeHtml(exName)}</h4>
+                            <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono">
+                                <span class="bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700/50"><b class="text-brand-400">${escapeHtml(exSeries)}</b> séries</span>
+                                <span class="bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700/50"><b class="text-brand-400">${escapeHtml(exReps)}</b> reps</span>
+                                <span class="bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700/50"><i class="fa-regular fa-clock mr-1"></i>${escapeHtml(exRest)}</span>
+                                ${badges}
+                            </div>
                         </div>
+                    </label>
+                    <div class="flex flex-col gap-1 flex-shrink-0">
+                        <button onclick="startRestTimer(${restSeconds})" title="Iniciar descanso (${restSeconds}s)" class="p-2 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded-xl transition border border-transparent hover:border-amber-500/20">
+                            <i class="fa-solid fa-stopwatch text-lg"></i>
+                        </button>
+                        <button onclick="openLoadModal('${escapeAttr(exName)}')" title="Registrar carga" class="p-2 text-brand-400 hover:text-brand-300 hover:bg-brand-500/10 rounded-xl transition border border-transparent hover:border-brand-500/20">
+                            <i class="fa-solid fa-dumbbell text-lg"></i>
+                        </button>
+                        <a href="https://www.youtube.com/results?search_query=${ytQuery}" target="_blank" rel="noopener noreferrer" title="Ver no YouTube" class="p-2 text-rose-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-xl transition flex-shrink-0 border border-transparent hover:border-rose-500/20">
+                            <i class="fa-brands fa-youtube text-lg"></i>
+                        </a>
                     </div>
-                </label>
-                <div class="flex flex-col gap-1 flex-shrink-0">
-                    <button onclick="startRestTimer(${parseRest(ex.rest)})" title="Iniciar descanso (${parseRest(ex.rest)}s)" class="p-2 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded-xl transition border border-transparent hover:border-amber-500/20">
-                        <i class="fa-solid fa-stopwatch text-lg"></i>
-                    </button>
-                    <button onclick="openLoadModal('${escapeAttr(ex.name)}')" title="Registrar carga" class="p-2 text-brand-400 hover:text-brand-300 hover:bg-brand-500/10 rounded-xl transition border border-transparent hover:border-brand-500/20">
-                        <i class="fa-solid fa-dumbbell text-lg"></i>
-                    </button>
-                    <a href="https://www.youtube.com/results?search_query=${ytQuery}" target="_blank" rel="noopener noreferrer" title="Ver no YouTube" class="p-2 text-rose-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-xl transition flex-shrink-0 border border-transparent hover:border-rose-500/20">
-                        <i class="fa-brands fa-youtube text-lg"></i>
-                    </a>
                 </div>
-            </div>
-        `;
-        list.appendChild(card);
+            `;
+            list.appendChild(card);
+        } catch (err) {
+            console.error('Erro ao renderizar exercício', exIdx, err, ex);
+        }
     });
     updateProgressBar(done, day.exercises.length);
 }
@@ -251,8 +339,6 @@ function toggleExercise(key) {
     renderCurrentDay();
     renderDayTabs();
     renderWeeklySummary();
-
-    // Se completou tudo, registra a sessão
     if (!wasChecked && isDayFullyCompleted(activeDayIndex)) {
         recordTrainingSession(activeDayIndex);
     }
@@ -265,9 +351,12 @@ function isDayFullyCompleted(idx) {
 }
 function updateProgressBar(done, total) {
     const pct = total > 0 ? Math.round(done/total*100) : 0;
-    document.getElementById('progress-bar-fill').style.width = pct+'%';
-    document.getElementById('progress-percentage').innerText = pct+'%';
-    document.getElementById('progress-count').innerText = `${done}/${total} exercícios`;
+    const bar = document.getElementById('progress-bar-fill');
+    const pctEl = document.getElementById('progress-percentage');
+    const cntEl = document.getElementById('progress-count');
+    if (bar) bar.style.width = pct+'%';
+    if (pctEl) pctEl.innerText = pct+'%';
+    if (cntEl) cntEl.innerText = `${done}/${total} exercícios`;
 }
 function resetCurrentDay() {
     const d = currentWorkout[activeDayIndex];
@@ -289,8 +378,8 @@ function clearAllProgress() {
 function renderWeeklySummary() {
     const c = document.getElementById('weekly-summary');
     const counter = document.getElementById('weekly-summary-count');
+    if (!c) return;
     let doneCount = 0, totalActive = 0;
-
     c.innerHTML = currentWorkout.map((d, idx) => {
         if (d.isRest) {
             return `<div class="aspect-square rounded-lg bg-slate-800/30 border border-slate-800 flex items-center justify-center text-[10px] text-slate-600 font-semibold">${(d.day||'').substring(0,3)}</div>`;
@@ -299,12 +388,9 @@ function renderWeeklySummary() {
         const full = isDayFullyCompleted(idx);
         if (full) doneCount++;
         const active = idx === activeDayIndex;
-        const cls = full
-            ? 'bg-brand-500/30 border-brand-500/60 text-brand-300'
-            : 'bg-slate-800/50 border-slate-800 text-slate-500';
+        const cls = full ? 'bg-brand-500/30 border-brand-500/60 text-brand-300' : 'bg-slate-800/50 border-slate-800 text-slate-500';
         return `<div onclick="goToDay(${idx})" class="aspect-square rounded-lg ${cls} ${active?'ring-1 ring-brand-400':''} border flex items-center justify-center text-[10px] font-semibold cursor-pointer hover:opacity-80 transition">${(d.day||'').substring(0,3)}</div>`;
     }).join('');
-
     if (counter) counter.innerText = `${doneCount}/${totalActive} treinos`;
 }
 function goToDay(idx) {
@@ -313,9 +399,10 @@ function goToDay(idx) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-// ============ UNFINISHED DAY BANNER ============
+// ============ UNFINISHED BANNER ============
 function checkUnfinishedDay() {
     const banner = document.getElementById('unfinished-banner');
+    if (!banner) return;
     const todayIdx = activeDayIndex;
     if (todayIdx > 0) {
         const prev = todayIdx - 1;
@@ -342,14 +429,16 @@ function goToUnfinishedDay() {
 
 // ============ REST TIMER ============
 function parseRest(rest) {
-    const m = String(rest).match(/(\d+)/);
+    const m = String(rest ?? '').match(/(\d+)/);
     return m ? parseInt(m[1]) : 60;
 }
 function startRestTimer(seconds) {
     stopRestTimer();
     restTimerEnd = Date.now() + seconds * 1000;
-    document.getElementById('rest-timer').classList.remove('hidden');
-    document.getElementById('timer-circle').classList.add('timer-ring');
+    const timerEl = document.getElementById('rest-timer');
+    const circle = document.getElementById('timer-circle');
+    if (timerEl) timerEl.classList.remove('hidden');
+    if (circle) circle.classList.add('timer-ring');
     updateRestTimerDisplay();
     restTimerInterval = setInterval(() => {
         updateRestTimerDisplay();
@@ -366,14 +455,17 @@ function updateRestTimerDisplay() {
     const remaining = Math.max(0, Math.ceil((restTimerEnd - Date.now()) / 1000));
     const m = Math.floor(remaining / 60);
     const s = remaining % 60;
-    document.getElementById('rest-timer-display').innerText = `${m}:${String(s).padStart(2,'0')}`;
+    const el = document.getElementById('rest-timer-display');
+    if (el) el.innerText = `${m}:${String(s).padStart(2,'0')}`;
 }
 function stopRestTimer() {
     if (restTimerInterval) clearInterval(restTimerInterval);
     restTimerInterval = null;
     restTimerEnd = null;
-    document.getElementById('rest-timer').classList.add('hidden');
-    document.getElementById('timer-circle').classList.remove('timer-ring');
+    const el = document.getElementById('rest-timer');
+    if (el) el.classList.add('hidden');
+    const circle = document.getElementById('timer-circle');
+    if (circle) circle.classList.remove('timer-ring');
 }
 function playBeep() {
     try {
@@ -388,6 +480,55 @@ function playBeep() {
     } catch(e) {}
 }
 
+// ============ SESSION TIMER ============
+function initSessionTimer() {
+    const saved = localStorage.getItem('meu_treino_session_start');
+    if (saved) {
+        sessionStartTime = parseInt(saved);
+        startSessionInterval();
+    }
+    updateSessionTimerDisplay();
+}
+function toggleSessionTimer() {
+    if (sessionStartTime) {
+        if (confirm('Encerrar sessão atual? A duração será descartada.')) {
+            sessionStartTime = null;
+            localStorage.removeItem('meu_treino_session_start');
+            if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+            sessionTimerInterval = null;
+            updateSessionTimerDisplay();
+            showToast('Cronômetro parado');
+        }
+    } else {
+        sessionStartTime = Date.now();
+        localStorage.setItem('meu_treino_session_start', sessionStartTime);
+        startSessionInterval();
+        showToast('Cronômetro iniciado 💪');
+    }
+}
+function startSessionInterval() {
+    if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+    updateSessionTimerDisplay();
+    sessionTimerInterval = setInterval(updateSessionTimerDisplay, 1000);
+}
+function updateSessionTimerDisplay() {
+    const el = document.getElementById('session-timer-display');
+    if (!el) return;
+    if (!sessionStartTime) {
+        el.innerText = '00:00';
+        return;
+    }
+    const elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
+    const h = Math.floor(elapsed / 3600);
+    const m = Math.floor((elapsed % 3600) / 60);
+    const s = elapsed % 60;
+    if (h > 0) {
+        el.innerText = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    } else {
+        el.innerText = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    }
+}
+
 // ============ EDITAR DIA ============
 function openEditDayModal() {
     const d = currentWorkout[activeDayIndex];
@@ -397,13 +538,12 @@ function openEditDayModal() {
     document.getElementById('edit-day-focus').value = d.focus || '';
     const list = document.getElementById('edit-exercises-list');
     list.innerHTML = '';
-    const exs = d.exercises || [];
+    const exs = Array.isArray(d.exercises) ? d.exercises : [];
     if (d.isRest) { d.isRest = false; d.exercises = d.exercises || []; }
-    if (!d.exercises.length) addEditExerciseRow('', '3', '10–12', '60–90s');
-    else d.exercises.forEach(ex => addEditExerciseRow(ex.name, ex.series, ex.reps, ex.rest));
+    if (!exs.length) addEditExerciseRow('', '3', '10–12', '60–90s');
+    else exs.forEach(ex => addEditExerciseRow(ex.name || '', ex.series || '3', ex.reps || '10–12', ex.rest || '60–90s'));
     document.getElementById('edit-day-modal').classList.remove('hidden');
 }
-
 function addEditExerciseRow(name, series, reps, rest) {
     const list = document.getElementById('edit-exercises-list');
     const row = document.createElement('div');
@@ -424,18 +564,13 @@ function addEditExerciseRow(name, series, reps, rest) {
     list.appendChild(row);
     setupDragFor(row, list);
 }
-
 function setupDragFor(row, list) {
     row.addEventListener('dragstart', e => {
         row.classList.add('opacity-50');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', '');
-        row._dragSrc = true;
     });
-    row.addEventListener('dragend', () => {
-        row.classList.remove('opacity-50');
-        row._dragSrc = false;
-    });
+    row.addEventListener('dragend', () => { row.classList.remove('opacity-50'); });
     row.addEventListener('dragover', e => {
         e.preventDefault();
         const after = getDragAfterElement(list, e.clientY);
@@ -452,19 +587,11 @@ function getDragAfterElement(container, y) {
         return closest;
     }, { offset: Number.NEGATIVE_INFINITY, element: null }).element;
 }
-
-function addExerciseToEditList() {
-    addEditExerciseRow('', '3', '10–12', '60–90s');
-}
-
+function addExerciseToEditList() { addEditExerciseRow('', '3', '10–12', '60–90s'); }
 function closeEditDayModal() {
-    if (editingDayBackup) {
-        currentWorkout[activeDayIndex] = editingDayBackup;
-        editingDayBackup = null;
-    }
+    if (editingDayBackup) { currentWorkout[activeDayIndex] = editingDayBackup; editingDayBackup = null; }
     document.getElementById('edit-day-modal').classList.add('hidden');
 }
-
 function saveEditedDay() {
     const newName = document.getElementById('edit-day-name').value.trim().toUpperCase();
     const newFocus = document.getElementById('edit-day-focus').value.trim();
@@ -479,41 +606,90 @@ function saveEditedDay() {
     });
     if (!newName) { showToast("Nome do dia é obrigatório", true); return; }
     if (!exercises.length) { showToast("Adicione ao menos 1 exercício", true); return; }
-
     currentWorkout[activeDayIndex] = { day: newName, focus: newFocus || 'Geral', exercises };
     saveWorkoutData();
     editingDayBackup = null;
-
     Object.keys(completedState).forEach(k => {
         if (k.startsWith(activeDayIndex + '_')) delete completedState[k];
     });
     saveCompletedState();
-
     document.getElementById('edit-day-modal').classList.add('hidden');
     renderDayTabs(); renderCurrentDay(); renderWeeklySummary();
     showToast("Dia atualizado!");
 }
 
-// ============ CARGA POR EXERCÍCIO ============
+// ============ CARGA ============
 function openLoadModal(exName) {
     editingExerciseName = exName;
+    currentRIR = null;
     document.getElementById('load-modal-exercise-name').innerText = exName;
     document.getElementById('load-input').value = '';
     document.getElementById('load-note-input').value = '';
-    const goal = loadGoals[exName];
-    document.getElementById('load-goal-input').value = goal || '';
-    document.getElementById('load-goal-progress').classList.add('hidden');
+    document.getElementById('load-goal-input').value = loadGoals[exName] || '';
+    document.getElementById('warmup-container').classList.add('hidden');
+    selectRIR(null);
+    renderWarmup();
     renderLoadHistory();
     document.getElementById('load-modal').classList.remove('hidden');
 }
 function closeLoadModal() {
     document.getElementById('load-modal').classList.add('hidden');
     editingExerciseName = null;
+    currentRIR = null;
 }
-function getLastLoad(exName) {
-    const arr = loadHistory[exName];
-    if (!arr || !arr.length) return null;
-    return arr[0];
+function selectRIR(value) {
+    currentRIR = value;
+    document.querySelectorAll('.rir-btn').forEach(btn => {
+        const rirNum = parseInt(btn.dataset.rir);
+        const isSelected = value !== null && rirNum === value;
+        if (isSelected) {
+            if (rirNum === 0) btn.className = 'rir-btn py-2 rounded-lg text-sm font-mono transition bg-rose-500/20 border-2 border-rose-500 text-rose-300 font-bold';
+            else if (rirNum === 1) btn.className = 'rir-btn py-2 rounded-lg text-sm font-mono transition bg-amber-500/20 border-2 border-amber-500 text-amber-300 font-bold';
+            else if (rirNum === 2) btn.className = 'rir-btn py-2 rounded-lg text-sm font-mono transition bg-amber-400/20 border-2 border-amber-400 text-amber-200 font-bold';
+            else btn.className = 'rir-btn py-2 rounded-lg text-sm font-mono transition bg-brand-500/20 border-2 border-brand-500 text-brand-300 font-bold';
+        } else {
+            btn.className = 'rir-btn py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 text-sm font-mono hover:border-slate-600 transition';
+        }
+    });
+    const hint = document.getElementById('rir-hint');
+    if (!hint) return;
+    if (value === null) hint.innerText = '0 = falha total • 3+ = sobrou muito';
+    else if (value === 0) hint.innerText = '🔥 Falha total — ótimo para isoladores';
+    else if (value === 1) hint.innerText = '💪 Perto da falha — ideal para hipertrofia';
+    else if (value === 2) hint.innerText = '👍 2 na reserva — bom para compostos';
+    else hint.innerText = '🌱 Sobrou bastante — série não estimulante';
+}
+function showRirHelp() {
+    showToast('RIR = quantas reps você ainda conseguiria fazer. 0 = falha, 1 = mais 1, etc.');
+}
+function toggleWarmup() {
+    const c = document.getElementById('warmup-container');
+    if (c) c.classList.toggle('hidden');
+}
+function renderWarmup() {
+    const c = document.getElementById('warmup-container');
+    if (!c || !editingExerciseName) return;
+    const lastLoad = getLastLoad(editingExerciseName);
+    const targetLoad = (lastLoad && typeof lastLoad.load === 'number') ? lastLoad.load : 40;
+    const steps = computeWarmup(targetLoad);
+    c.innerHTML = `
+        <p class="text-[10px] text-slate-500 mb-1">Baseado na última carga (${targetLoad}kg):</p>
+        ${steps.map(s => `
+            <div class="flex justify-between items-center py-0.5">
+                <span class="text-slate-400">${s.label}</span>
+                <span class="font-mono text-orange-300 font-bold">${s.weight}kg × ${s.reps}</span>
+            </div>
+        `).join('')}
+    `;
+}
+function computeWarmup(targetWeight) {
+    const w = (pct) => Math.round((targetWeight * pct) / 2.5) * 2.5;
+    return [
+        { label: 'Barra vazia (aquec.)', weight: 20, reps: 10 },
+        { label: '50% · ativação', weight: w(0.5), reps: 5 },
+        { label: '70% · adaptação', weight: w(0.7), reps: 3 },
+        { label: '90% · aproximação', weight: w(0.9), reps: 1 }
+    ];
 }
 function saveLoad() {
     const val = parseFloat(document.getElementById('load-input').value);
@@ -524,40 +700,48 @@ function saveLoad() {
 
     const today = new Date().toLocaleDateString('pt-BR', {day:'2-digit', month:'2-digit'});
     if (!loadHistory[editingExerciseName]) loadHistory[editingExerciseName] = [];
-    loadHistory[editingExerciseName].unshift({ date: today, load: val, note });
+    const entry = { date: today, load: val, note };
+    if (currentRIR !== null) entry.rir = currentRIR;
+    loadHistory[editingExerciseName].unshift(entry);
     saveLoadData();
 
-    if (!isNaN(goalVal) && goalVal > 0) {
-        loadGoals[editingExerciseName] = goalVal;
-    } else {
-        delete loadGoals[editingExerciseName];
-    }
+    if (!isNaN(goalVal) && goalVal > 0) loadGoals[editingExerciseName] = goalVal;
+    else delete loadGoals[editingExerciseName];
     saveLoadGoals();
 
+    const rirMsg = currentRIR !== null ? ` · RIR ${currentRIR >= 3 ? '3+' : currentRIR}` : '';
     closeLoadModal();
     renderCurrentDay();
-    showToast(`Carga de ${val}kg registrada!`);
+    showToast(`Carga ${val}kg${rirMsg} registrada!`);
 }
 function renderLoadHistory() {
     const c = document.getElementById('load-history-list');
+    if (!c) return;
     if (!editingExerciseName || !loadHistory[editingExerciseName]?.length) {
         c.innerHTML = `<p class="text-center py-2 text-slate-500">Nenhuma carga registrada ainda</p>`;
         return;
     }
     const goal = loadGoals[editingExerciseName];
     c.innerHTML = loadHistory[editingExerciseName].map((item, idx) => {
+        const rirBadge = (item.rir !== undefined && item.rir !== null)
+            ? `<span class="text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                item.rir === 0 ? 'bg-rose-500/15 text-rose-300'
+                : item.rir <= 2 ? 'bg-amber-500/15 text-amber-300'
+                : 'bg-brand-500/15 text-brand-300'
+            }">RIR ${item.rir >= 3 ? '3+' : item.rir}</span>` : '';
         let goalHtml = '';
         if (goal) {
             const pct = Math.min(100, Math.round(item.load / goal * 100));
-            goalHtml = `<span class="text-[10px] text-purple-400 font-mono">${pct}% meta</span>`;
+            goalHtml = `<span class="text-[10px] text-purple-400 font-mono">${pct}%</span>`;
         }
         return `
-            <div class="flex justify-between items-center py-1 border-b border-slate-800 gap-2">
-                <span class="flex-1">${item.date} ${item.note ? `<span class="text-slate-500 italic">— ${escapeHtml(item.note)}</span>` : ''}</span>
-                <div class="flex items-center gap-2 flex-shrink-0">
+            <div class="flex justify-between items-center py-1 border-b border-slate-800 gap-1.5">
+                <span class="flex-1 text-[11px]">${item.date} ${item.note ? `<span class="text-slate-500 italic">— ${escapeHtml(item.note)}</span>` : ''}</span>
+                <div class="flex items-center gap-1.5 flex-shrink-0">
+                    ${rirBadge}
                     ${goalHtml}
-                    <span class="font-mono font-bold text-cyan-300">${item.load} kg</span>
-                    <button onclick="deleteLoadEntry('${escapeAttr(editingExerciseName)}', ${idx})" class="text-rose-400 hover:text-rose-300 p-1"><i class="fa-solid fa-xmark text-xs"></i></button>
+                    <span class="font-mono font-bold text-cyan-300 text-xs">${item.load}kg</span>
+                    <button onclick="deleteLoadEntry('${escapeAttr(editingExerciseName)}', ${idx})" class="text-rose-400 hover:text-rose-300 p-1"><i class="fa-solid fa-xmark text-[10px]"></i></button>
                 </div>
             </div>
         `;
@@ -572,20 +756,56 @@ function deleteLoadEntry(exName, idx) {
     renderCurrentDay();
 }
 
-// ============ PROGRESSÃO AUTOMÁTICA ============
+// ============ PROGRESSÃO + DELOAD ============
 function getProgressionSuggestion(exName) {
-    const arr = loadHistory[exName];
-    if (!arr || arr.length < 3) return null;
-    const last3 = arr.slice(0, 3);
-    const same = last3.every(l => l.load === last3[0].load);
-    if (same) {
-        const increment = last3[0].load < 20 ? 2.5 : last3[0].load < 50 ? 2.5 : 5;
-        return { suggested: (last3[0].load + increment).toFixed(1) };
+    try {
+        const arr = loadHistory[exName];
+        if (!arr || !Array.isArray(arr) || arr.length < 3) return null;
+        const last3 = arr.slice(0, 3);
+        const sameLoad = last3.every(l => l.load === last3[0].load);
+        const highRIR = last3.every(l => (l.rir ?? 2) >= 2);
+        if (sameLoad && highRIR) {
+            const increment = last3[0].load < 50 ? 2.5 : 5;
+            return { suggested: (last3[0].load + increment).toFixed(1) };
+        }
+        return null;
+    } catch (e) {
+        console.warn('getProgressionSuggestion erro:', e);
+        return null;
     }
-    return null;
 }
 
-// ============ HISTÓRICO GERAL DE CARGAS ============
+function getDeloadWarning(exName) {
+    try {
+        const arr = loadHistory[exName];
+        if (!arr || !Array.isArray(arr) || arr.length < 4) return false;
+        const last4 = arr.slice(0, 4);
+        const sameLoad = last4.every(l => l.load === last4[0].load);
+        const highEffort = last4.every(l => (l.rir ?? 2) <= 1);
+        if (!sameLoad || !highEffort) return false;
+
+        const oldest = last4[3];
+        if (!oldest || typeof oldest.date !== 'string') return false;
+        const parts = oldest.date.split('/');
+        if (parts.length !== 2) return false;
+
+        const day = parseInt(parts[0]);
+        const month = parseInt(parts[1]) - 1;
+        if (isNaN(day) || isNaN(month)) return false;
+
+        const now = new Date();
+        let year = now.getFullYear();
+        if (month > now.getMonth()) year--;
+        const oldDate = new Date(year, month, day);
+        const diffDays = (now - oldDate) / (1000 * 60 * 60 * 24);
+        return diffDays > 21;
+    } catch (e) {
+        console.warn('getDeloadWarning erro:', e);
+        return false;
+    }
+}
+
+// ============ HISTÓRICO GERAL CARGAS ============
 function openLoadHistoryModal() {
     renderLoadHistoryOverview();
     document.getElementById('load-history-modal').classList.remove('hidden');
@@ -595,7 +815,8 @@ function closeLoadHistoryModal() {
 }
 function renderLoadHistoryOverview() {
     const c = document.getElementById('load-history-container');
-    const names = Object.keys(loadHistory).filter(n => loadHistory[n]?.length).sort();
+    if (!c) return;
+    const names = Object.keys(loadHistory).filter(n => Array.isArray(loadHistory[n]) && loadHistory[n].length).sort();
     if (!names.length) {
         c.innerHTML = `<p class="text-center text-slate-500 py-6 text-sm">Nenhuma carga registrada ainda.</p>`;
         return;
@@ -623,12 +844,13 @@ function renderLoadHistoryOverview() {
                 <span class="text-[10px] text-purple-400">Meta: ${goal}kg (${pct}%)</span>
             </div>`;
         }
-        const histHtml = arr.slice(0, 5).map(a => `
-            <div class="flex justify-between text-[11px] text-slate-400 py-0.5">
+        const histHtml = arr.slice(0, 5).map(a => {
+            const rirTxt = (a.rir !== undefined && a.rir !== null) ? ` · RIR ${a.rir >= 3 ? '3+' : a.rir}` : '';
+            return `<div class="flex justify-between text-[11px] text-slate-400 py-0.5">
                 <span>${a.date}</span>
-                <span class="font-mono">${a.load} kg</span>
-            </div>
-        `).join('');
+                <span class="font-mono">${a.load}kg${rirTxt}</span>
+            </div>`;
+        }).join('');
         return `
             <details class="bg-slate-950 border border-slate-800 rounded-xl p-3">
                 <summary class="cursor-pointer flex justify-between items-center gap-2">
@@ -647,43 +869,40 @@ function renderLoadHistoryOverview() {
     }).join('');
 }
 
-// ============ HISTÓRICO DE TREINOS ============
+// ============ HISTÓRICO TREINOS ============
 function recordTrainingSession(dayIdx) {
     const day = currentWorkout[dayIdx];
     if (!day || day.isRest) return;
     const today = new Date();
     const dateStr = today.toISOString().split('T')[0];
-
-    // Evita duplicar sessão no mesmo dia
     const existing = trainingHistory.find(t => t.date === dateStr && t.dayName === day.day);
     if (existing) return;
-
     const lastLoads = {};
     (day.exercises || []).forEach(ex => {
         const l = getLastLoad(ex.name);
         if (l) lastLoads[ex.name] = l.load;
     });
-
+    const duration = sessionStartTime ? Math.round((Date.now() - sessionStartTime) / 60000) : null;
     trainingHistory.unshift({
         date: dateStr,
         dayName: day.day,
         focus: day.focus,
         exerciseCount: day.exercises.length,
-        loads: lastLoads
+        loads: lastLoads,
+        duration
     });
-    // Mantém só 200 últimas
     if (trainingHistory.length > 200) trainingHistory = trainingHistory.slice(0, 200);
     saveTrainingHistory();
-    showToast(`🎉 Treino de ${day.day} registrado!`);
+    const durMsg = duration ? ` em ${duration}min` : '';
+    showToast(`🎉 Treino de ${day.day} registrado${durMsg}!`);
 }
-
 function openTrainingHistoryModal() {
     const stats = computeStats();
     document.getElementById('stat-streak').innerText = stats.streak;
     document.getElementById('stat-total').innerText = stats.total;
     document.getElementById('stat-month').innerText = stats.month;
-
     const c = document.getElementById('training-history-container');
+    if (!c) return;
     if (!trainingHistory.length) {
         c.innerHTML = `<p class="text-center text-slate-500 py-6 text-sm">Nenhum treino registrado. Complete um dia inteiro para começar!</p>`;
     } else {
@@ -691,7 +910,7 @@ function openTrainingHistoryModal() {
             <div class="bg-slate-950 border border-slate-800 rounded-xl p-2.5 flex items-center justify-between gap-2">
                 <div class="flex-1">
                     <p class="text-sm font-semibold text-slate-200">${escapeHtml(t.dayName)} <span class="text-xs text-slate-500 font-normal">${t.date}</span></p>
-                    <p class="text-[11px] text-slate-400">${escapeHtml(t.focus || '')} • ${t.exerciseCount} exercícios</p>
+                    <p class="text-[11px] text-slate-400">${escapeHtml(t.focus || '')} • ${t.exerciseCount} exercícios${t.duration ? ' • ' + t.duration + 'min' : ''}</p>
                 </div>
                 <i class="fa-solid fa-circle-check text-brand-500"></i>
             </div>
@@ -702,7 +921,6 @@ function openTrainingHistoryModal() {
 function closeTrainingHistoryModal() {
     document.getElementById('training-history-modal').classList.add('hidden');
 }
-
 function computeStats() {
     const total = trainingHistory.length;
     const now = new Date();
@@ -722,7 +940,6 @@ function computeStreak() {
     let todayStr = fmt(cur);
     if (!dates.includes(todayStr)) {
         cur.setDate(cur.getDate() - 1);
-        todayStr = fmt(cur);
     }
     for (let i = 0; i < 365; i++) {
         const s = fmt(cur);
@@ -754,6 +971,7 @@ function saveWeight() {
 }
 function renderWeightHistory() {
     const c = document.getElementById('weight-history-list');
+    if (!c) return;
     if (!weightHistory.length) {
         c.innerHTML = `<p class="text-center py-2 text-slate-500">Nenhum histórico</p>`;
         return;
@@ -776,11 +994,12 @@ function deleteWeight(idx) {
 }
 function renderWeightChart() {
     const c = document.getElementById('weight-chart');
+    if (!c) return;
     if (weightHistory.length < 2) {
         c.innerHTML = `<p class="text-center text-slate-600 text-xs pt-8">Registre ao menos 2 pesos para ver o gráfico</p>`;
         return;
     }
-    const data = [...weightHistory].reverse(); // oldest first
+    const data = [...weightHistory].reverse();
     const weights = data.map(d => d.weight);
     const min = Math.min(...weights) - 1;
     const max = Math.max(...weights) + 1;
@@ -797,34 +1016,32 @@ function renderWeightChart() {
     const first = data[0].weight;
     const diff = (last - first).toFixed(1);
     const color = diff > 0 ? '#f43f5e' : diff < 0 ? '#22c55e' : '#94a3b8';
-
     c.innerHTML = `
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="w-full h-full">
             <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${polyline}" vector-effect="non-scaling-stroke"/>
-            ${pts.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="1.2" fill="${color}" vector-effect="non-scaling-stroke" />`).join('')}
+            ${pts.map(p => `<circle cx="${p[0]}" cy="${p[1]}" r="1.2" fill="${color}" vector-effect="non-scaling-stroke" />`).join('')}
         </svg>
     `;
 }
 function updateWeightDisplay() {
     const el = document.getElementById('header-weight-display');
-    el.innerText = weightHistory.length ? `${weightHistory[0].weight} kg` : `-- kg`;
+    if (el) el.innerText = weightHistory.length ? `${weightHistory[0].weight} kg` : `-- kg`;
 }
 
-// ============ BUSCA GLOBAL ============
+// ============ BUSCA ============
 function handleGlobalSearch(q) {
     const results = document.getElementById('search-results');
+    if (!results) return;
     q = q.trim().toLowerCase();
     if (!q) { results.classList.add('hidden'); return; }
-
     const matches = [];
     currentWorkout.forEach((day, di) => {
-        (day.exercises || []).forEach((ex, ei) => {
-            if (ex.name.toLowerCase().includes(q)) {
-                matches.push({ day, di, ei, ex });
+        (day.exercises || []).forEach((ex) => {
+            if (ex && ex.name && ex.name.toLowerCase().includes(q)) {
+                matches.push({ day, di, ex });
             }
         });
     });
-
     if (!matches.length) {
         results.innerHTML = `<p class="text-center text-slate-500 py-3 text-sm">Nada encontrado para "${escapeHtml(q)}"</p>`;
     } else {
@@ -845,10 +1062,10 @@ function handleGlobalSearch(q) {
     results.classList.remove('hidden');
 }
 
-// ============ BACKUP COMPLETO ============
+// ============ BACKUP ============
 function backupAllData() {
     const data = {
-        version: 3,
+        version: 4,
         exportedAt: new Date().toISOString(),
         workout: currentWorkout,
         completed: completedState,
@@ -879,14 +1096,13 @@ function restoreBackup(event) {
     reader.onload = e => {
         try {
             const data = JSON.parse(e.target.result);
-            if (data.workout) currentWorkout = data.workout;
+            if (data.workout && Array.isArray(data.workout)) currentWorkout = data.workout;
             if (data.completed) completedState = data.completed;
             if (data.weight) weightHistory = data.weight;
             if (data.loads) loadHistory = data.loads;
             if (data.trainingHistory) trainingHistory = data.trainingHistory;
             if (data.loadGoals) loadGoals = data.loadGoals;
             if (data.sessionNotes) sessionNotes = data.sessionNotes;
-
             saveWorkoutData();
             saveCompletedState();
             saveWeightData();
@@ -894,7 +1110,6 @@ function restoreBackup(event) {
             saveTrainingHistory();
             saveLoadGoals();
             saveSessionNotes();
-
             activeDayIndex = 0;
             renderDayTabs(); renderCurrentDay(); renderWeeklySummary();
             showToast('Backup restaurado!');
@@ -907,7 +1122,7 @@ function restoreBackup(event) {
     reader.readAsText(file);
 }
 
-// ============ IMPORT/EXPORT XLSX ============
+// ============ XLSX ============
 function handleXlsxImport(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -928,7 +1143,6 @@ function handleXlsxImport(event) {
     };
     reader.readAsArrayBuffer(file);
 }
-
 function parseAndApplyWorkoutData(rows) {
     const map = {};
     rows.forEach(row => {
@@ -957,74 +1171,39 @@ function parseAndApplyWorkoutData(rows) {
         renderDayTabs(); renderCurrentDay(); renderWeeklySummary();
     }
 }
-
 function exportToXlsx() {
     const out = [];
-    currentWorkout.forEach((dayObj, dayIdx) => {
+    currentWorkout.forEach((dayObj) => {
         if (dayObj.isRest || !dayObj.exercises?.length) {
-            out.push({ 'Dia':dayObj.day, 'Foco muscular':dayObj.focus||'Descanso',
-                'Exercício':'Descanso / Recuperação', 'Séries':'-', 'Repetições':'-',
-                'Descanso':'-', 'Última Carga (kg)':'-', 'Meta (kg)':'-', 'Concluído ✓':'-' });
+            out.push({
+                'Dia': dayObj.day,
+                'Foco muscular': dayObj.focus || 'Descanso',
+                'Exercício': '',
+                'Séries': '',
+                'Repetições': '',
+                'Descanso': ''
+            });
         } else {
-            dayObj.exercises.forEach((ex, exIdx) => {
-                const done = !!completedState[`${dayIdx}_${exIdx}`];
-                const last = getLastLoad(ex.name);
+            dayObj.exercises.forEach(ex => {
                 out.push({
-                    'Dia':dayObj.day, 'Foco muscular':dayObj.focus, 'Exercício':ex.name,
-                    'Séries':ex.series, 'Repetições':ex.reps, 'Descanso':ex.rest,
-                    'Última Carga (kg)': last ? last.load : '',
-                    'Meta (kg)': loadGoals[ex.name] || '',
-                    'Concluído ✓': done ? 'SIM' : 'NÃO'
+                    'Dia': dayObj.day,
+                    'Foco muscular': dayObj.focus,
+                    'Exercício': ex.name,
+                    'Séries': ex.series,
+                    'Repetições': ex.reps,
+                    'Descanso': ex.rest
                 });
             });
         }
     });
     const ws = XLSX.utils.json_to_sheet(out);
+    ws['!cols'] = [{ wch: 12 }, { wch: 24 }, { wch: 45 }, { wch: 8 }, { wch: 12 }, { wch: 14 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Treino');
     XLSX.writeFile(wb, 'Meu_Treino_Atual.xlsx');
-    showToast("XLSX exportado!");
+    showToast('XLSX exportado!');
 }
-
-function restoreDefaultWorkout() {
-    if (!confirm('Substituir treino atual pelos padrões do Flavão? Progresso e histórico de cargas serão mantidos.')) return;
-    currentWorkout = clone(DEFAULT_WORKOUT_FLAVAO);
-    saveWorkoutData();
-    completedState = {}; saveCompletedState();
-    activeDayIndex = 0;
-    renderDayTabs(); renderCurrentDay(); renderWeeklySummary();
-    toggleSettingsMenu();
-    showToast("Treino padrão restaurado!");
-}
-
-// ============ UTILS ============
-function toggleSettingsMenu() {
-    document.getElementById('settings-modal').classList.toggle('hidden');
-}
-function showToast(text, isError=false) {
-    const t = document.getElementById('toast-message');
-    const txt = document.getElementById('toast-text');
-    const icon = document.getElementById('toast-icon');
-    txt.innerText = text;
-    icon.className = isError
-        ? "fa-solid fa-circle-exclamation text-rose-500 text-base"
-        : "fa-solid fa-circle-check text-brand-500 text-base";
-    t.classList.remove('opacity-0','pointer-events-none','translate-y-4');
-    t.classList.add('opacity-100','translate-y-0');
-    clearTimeout(window._toastTO);
-    window._toastTO = setTimeout(() => {
-        t.classList.remove('opacity-100','translate-y-0');
-        t.classList.add('opacity-0','pointer-events-none','translate-y-4');
-    }, 3000);
-}
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
-
-// ============ BAIXAR MODELO DE PLANILHA ============
 function downloadTemplateXlsx() {
-    // Linhas de exemplo que demonstram o formato esperado
     const modelRows = [
         { 'Dia':'SEGUNDA', 'Foco muscular':'Peito + tríceps', 'Exercício':'Supino reto máquina, halteres ou smith', 'Séries':'3', 'Repetições':'8–12', 'Descanso':'90–120s' },
         { 'Dia':'SEGUNDA', 'Foco muscular':'Peito + tríceps', 'Exercício':'Supino inclinado com halteres ou smith', 'Séries':'3', 'Repetições':'10–12', 'Descanso':'90s' },
@@ -1036,21 +1215,9 @@ function downloadTemplateXlsx() {
         { 'Dia':'SÁBADO',  'Foco muscular':'Descanso', 'Exercício':'', 'Séries':'', 'Repetições':'', 'Descanso':'' },
         { 'Dia':'DOMINGO', 'Foco muscular':'Descanso', 'Exercício':'', 'Séries':'', 'Repetições':'', 'Descanso':'' }
     ];
-
-    // Folha 1: Exemplo
     const wsModel = XLSX.utils.json_to_sheet(modelRows);
+    wsModel['!cols'] = [{ wch: 12 }, { wch: 24 }, { wch: 45 }, { wch: 8 }, { wch: 12 }, { wch: 14 }];
 
-    // Ajustar largura das colunas para ficar legível
-    wsModel['!cols'] = [
-        { wch: 12 },  // Dia
-        { wch: 24 },  // Foco muscular
-        { wch: 45 },  // Exercício
-        { wch: 8 },   // Séries
-        { wch: 12 },  // Repetições
-        { wch: 14 }   // Descanso
-    ];
-
-    // Folha 2: Instruções
     const instructions = [
         { 'Instruções de Preenchimento': '' },
         { 'Instruções de Preenchimento': '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' },
@@ -1088,11 +1255,46 @@ function downloadTemplateXlsx() {
     const wsInstructions = XLSX.utils.json_to_sheet(instructions);
     wsInstructions['!cols'] = [{ wch: 80 }];
 
-    // Montar workbook
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, wsModel, 'Modelo');
     XLSX.utils.book_append_sheet(wb, wsInstructions, 'Instruções');
-
     XLSX.writeFile(wb, 'Modelo_Treino_Flavão.xlsx');
     showToast('Modelo de planilha baixado!');
 }
+
+function restoreDefaultWorkout() {
+    if (!confirm('Substituir treino atual pelos padrões do Flavão? Progresso e histórico de cargas serão mantidos.')) return;
+    currentWorkout = clone(DEFAULT_WORKOUT_FLAVAO);
+    saveWorkoutData();
+    completedState = {}; saveCompletedState();
+    activeDayIndex = 0;
+    renderDayTabs(); renderCurrentDay(); renderWeeklySummary();
+    toggleSettingsMenu();
+    showToast("Treino padrão restaurado!");
+}
+
+// ============ UTILS ============
+function toggleSettingsMenu() {
+    document.getElementById('settings-modal').classList.toggle('hidden');
+}
+function showToast(text, isError=false) {
+    const t = document.getElementById('toast-message');
+    const txt = document.getElementById('toast-text');
+    const icon = document.getElementById('toast-icon');
+    if (!t) return;
+    txt.innerText = text;
+    icon.className = isError
+        ? "fa-solid fa-circle-exclamation text-rose-500 text-base"
+        : "fa-solid fa-circle-check text-brand-500 text-base";
+    t.classList.remove('opacity-0','pointer-events-none','translate-y-4');
+    t.classList.add('opacity-100','translate-y-0');
+    clearTimeout(window._toastTO);
+    window._toastTO = setTimeout(() => {
+        t.classList.remove('opacity-100','translate-y-0');
+        t.classList.add('opacity-0','pointer-events-none','translate-y-4');
+    }, 3000);
+}
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
