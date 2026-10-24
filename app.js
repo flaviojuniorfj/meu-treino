@@ -1021,3 +1021,78 @@ function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
+
+// ============ BAIXAR MODELO DE PLANILHA ============
+function downloadTemplateXlsx() {
+    // Linhas de exemplo que demonstram o formato esperado
+    const modelRows = [
+        { 'Dia':'SEGUNDA', 'Foco muscular':'Peito + tríceps', 'Exercício':'Supino reto máquina, halteres ou smith', 'Séries':'3', 'Repetições':'8–12', 'Descanso':'90–120s' },
+        { 'Dia':'SEGUNDA', 'Foco muscular':'Peito + tríceps', 'Exercício':'Supino inclinado com halteres ou smith', 'Séries':'3', 'Repetições':'10–12', 'Descanso':'90s' },
+        { 'Dia':'SEGUNDA', 'Foco muscular':'Peito + tríceps', 'Exercício':'Crucifixo máquina (peck deck) ou articulada', 'Séries':'3', 'Repetições':'12–15', 'Descanso':'60–90s' },
+        { 'Dia':'TERÇA',   'Foco muscular':'Costas + bíceps', 'Exercício':'Puxada frontal', 'Séries':'3', 'Repetições':'8–12', 'Descanso':'90–120s' },
+        { 'Dia':'TERÇA',   'Foco muscular':'Costas + bíceps', 'Exercício':'Remada sentada pegada neutra', 'Séries':'3', 'Repetições':'10–12', 'Descanso':'90s' },
+        { 'Dia':'QUARTA',  'Foco muscular':'Pernas - quadríceps', 'Exercício':'Leg press 45º', 'Séries':'3', 'Repetições':'10–12', 'Descanso':'90–120s' },
+        { 'Dia':'QUARTA',  'Foco muscular':'Pernas - quadríceps', 'Exercício':'Cadeira extensora', 'Séries':'3', 'Repetições':'12–15', 'Descanso':'60–90s' },
+        { 'Dia':'SÁBADO',  'Foco muscular':'Descanso', 'Exercício':'', 'Séries':'', 'Repetições':'', 'Descanso':'' },
+        { 'Dia':'DOMINGO', 'Foco muscular':'Descanso', 'Exercício':'', 'Séries':'', 'Repetições':'', 'Descanso':'' }
+    ];
+
+    // Folha 1: Exemplo
+    const wsModel = XLSX.utils.json_to_sheet(modelRows);
+
+    // Ajustar largura das colunas para ficar legível
+    wsModel['!cols'] = [
+        { wch: 12 },  // Dia
+        { wch: 24 },  // Foco muscular
+        { wch: 45 },  // Exercício
+        { wch: 8 },   // Séries
+        { wch: 12 },  // Repetições
+        { wch: 14 }   // Descanso
+    ];
+
+    // Folha 2: Instruções
+    const instructions = [
+        { 'Instruções de Preenchimento': '' },
+        { 'Instruções de Preenchimento': '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' },
+        { 'Instruções de Preenchimento': 'COMO USAR ESTA PLANILHA' },
+        { 'Instruções de Preenchimento': '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' },
+        { 'Instruções de Preenchimento': '' },
+        { 'Instruções de Preenchimento': '1. Preencha a aba "Modelo" (ou crie a sua própria).' },
+        { 'Instruções de Preenchimento': '2. Mantenha os nomes das colunas EXATAMENTE como estão:' },
+        { 'Instruções de Preenchimento': '   Dia | Foco muscular | Exercício | Séries | Repetições | Descanso' },
+        { 'Instruções de Preenchimento': '3. Cada linha = 1 exercício.' },
+        { 'Instruções de Preenchimento': '4. Repita o "Dia" e o "Foco muscular" em cada linha do mesmo dia.' },
+        { 'Instruções de Preenchimento': '5. Para um dia de DESCANSO, deixe a coluna "Exercício" vazia.' },
+        { 'Instruções de Preenchimento': '6. Salve o arquivo como .xlsx.' },
+        { 'Instruções de Preenchimento': '7. No app: Menu (⋮) → Importar Treino (.xlsx) → escolha o arquivo.' },
+        { 'Instruções de Preenchimento': '' },
+        { 'Instruções de Preenchimento': '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' },
+        { 'Instruções de Preenchimento': 'REGRAS IMPORTANTES' },
+        { 'Instruções de Preenchimento': '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' },
+        { 'Instruções de Preenchimento': '' },
+        { 'Instruções de Preenchimento': '• A importação SUBSTITUI todo o treino atual.' },
+        { 'Instruções de Preenchimento': '• O histórico de cargas e pesos corporais é MANTIDO.' },
+        { 'Instruções de Preenchimento': '• Os checkboxes de progresso são ZERADOS.' },
+        { 'Instruções de Preenchimento': '• Faça um Backup (.json) antes, se quiser garantir.' },
+        { 'Instruções de Preenchimento': '' },
+        { 'Instruções de Preenchimento': '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' },
+        { 'Instruções de Preenchimento': 'EXEMPLO DE PREENCHIMENTO' },
+        { 'Instruções de Preenchimento': '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' },
+        { 'Instruções de Preenchimento': '' },
+        { 'Instruções de Preenchimento': 'Dia      | Foco muscular        | Exercício         | Séries | Repetições | Descanso' },
+        { 'Instruções de Preenchimento': 'SEGUNDA  | Peito + tríceps       | Supino reto       | 3      | 8–12       | 90–120s' },
+        { 'Instruções de Preenchimento': 'SEGUNDA  | Peito + tríceps       | Crucifixo         | 3      | 12–15      | 60–90s' },
+        { 'Instruções de Preenchimento': 'TERÇA    | Costas + bíceps       | Puxada frontal    | 3      | 8–12       | 90–120s' },
+        { 'Instruções de Preenchimento': 'SÁBADO   | Descanso              | (vazio)           |        |            |' }
+    ];
+    const wsInstructions = XLSX.utils.json_to_sheet(instructions);
+    wsInstructions['!cols'] = [{ wch: 80 }];
+
+    // Montar workbook
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsModel, 'Modelo');
+    XLSX.utils.book_append_sheet(wb, wsInstructions, 'Instruções');
+
+    XLSX.writeFile(wb, 'Modelo_Treino_Flavão.xlsx');
+    showToast('Modelo de planilha baixado!');
+}
