@@ -1,7 +1,7 @@
 /* =========================================================
-   MEU TREINO - Flavão Edition  v4.1
+   MEU TREINO - Flavão Edition  v4.2
    Fase 2: RIR + Cronômetro + Aquecimento + Deload + PWA auto-update
-   Correção: renderCurrentDay defensivo
+   Correção: botão de carga robusto contra nomes com caracteres especiais
    ========================================================= */
 
 // ============ DEFAULT WORKOUT ============
@@ -173,7 +173,6 @@ function loadAll() {
     const sn = localStorage.getItem('meu_treino_session_notes');
     sessionNotes = sn ? safeParse(sn, {}) : {};
 
-    // Garante estrutura mínima
     if (!Array.isArray(currentWorkout) || currentWorkout.length === 0) {
         currentWorkout = clone(DEFAULT_WORKOUT_FLAVAO);
     }
@@ -212,7 +211,6 @@ function renderDayTabs() {
     });
 }
 
-// ⭐ VERSÃO CORRIGIDA E DEFENSIVA
 function renderCurrentDay() {
     const day = currentWorkout[activeDayIndex];
     if (!day) return;
@@ -253,13 +251,11 @@ function renderCurrentDay() {
             const checked = !!completedState[key];
             if (checked) done++;
 
-            // Sanitização: protege contra undefined/null em qualquer campo
             const exName = String(ex.name || 'Exercício sem nome');
             const exSeries = String(ex.series ?? '3');
             const exReps = String(ex.reps ?? '10–12');
             const exRest = String(ex.rest ?? '60–90s');
 
-            // Cada uma dessas chamadas isolada, pra uma falhar e não derrubar as outras
             let lastLoad = null, goal = null, progression = null, deload = false;
             try { lastLoad = getLastLoad(exName); } catch(e) { console.warn('getLastLoad:', e); }
             try { goal = loadGoals[exName]; } catch(e) {}
@@ -315,7 +311,7 @@ function renderCurrentDay() {
                         <button onclick="startRestTimer(${restSeconds})" title="Iniciar descanso (${restSeconds}s)" class="p-2 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded-xl transition border border-transparent hover:border-amber-500/20">
                             <i class="fa-solid fa-stopwatch text-lg"></i>
                         </button>
-                        <button onclick="openLoadModal('${escapeAttr(exName)}')" title="Registrar carga" class="p-2 text-brand-400 hover:text-brand-300 hover:bg-brand-500/10 rounded-xl transition border border-transparent hover:border-brand-500/20">
+                        <button type="button" data-exname="${escapeAttr(exName)}" onclick="openLoadModal(this.dataset.exname)" title="Registrar carga" class="p-2 text-brand-400 hover:text-brand-300 hover:bg-brand-500/10 rounded-xl transition border border-transparent hover:border-brand-500/20">
                             <i class="fa-solid fa-dumbbell text-lg"></i>
                         </button>
                         <a href="https://www.youtube.com/results?search_query=${ytQuery}" target="_blank" rel="noopener noreferrer" title="Ver no YouTube" class="p-2 text-rose-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-xl transition flex-shrink-0 border border-transparent hover:border-rose-500/20">
@@ -618,28 +614,52 @@ function saveEditedDay() {
     showToast("Dia atualizado!");
 }
 
-// ============ CARGA ============
+// ============ CARGA (ROBUSTO) ============
 function openLoadModal(exName) {
-    editingExerciseName = exName;
-    currentRIR = null;
-    document.getElementById('load-modal-exercise-name').innerText = exName;
-    document.getElementById('load-input').value = '';
-    document.getElementById('load-note-input').value = '';
-    document.getElementById('load-goal-input').value = loadGoals[exName] || '';
-    document.getElementById('warmup-container').classList.add('hidden');
-    selectRIR(null);
-    renderWarmup();
-    renderLoadHistory();
-    document.getElementById('load-modal').classList.remove('hidden');
+    try {
+        editingExerciseName = exName;
+        currentRIR = null;
+
+        const modalEl = document.getElementById('load-modal');
+        if (!modalEl) {
+            console.error('❌ #load-modal não encontrado. Atualize o index.html.');
+            showToast('Erro: modal de carga ausente. Atualize o index.html.', true);
+            return;
+        }
+
+        const nameEl = document.getElementById('load-modal-exercise-name');
+        const inputEl = document.getElementById('load-input');
+        const noteEl = document.getElementById('load-note-input');
+        const goalEl = document.getElementById('load-goal-input');
+        const warmupEl = document.getElementById('warmup-container');
+
+        if (nameEl) nameEl.innerText = exName;
+        if (inputEl) inputEl.value = '';
+        if (noteEl) noteEl.value = '';
+        if (goalEl) goalEl.value = loadGoals[exName] || '';
+        if (warmupEl) warmupEl.classList.add('hidden');
+
+        try { selectRIR(null); } catch(e) { console.warn('selectRIR falhou:', e); }
+        try { renderWarmup(); } catch(e) { console.warn('renderWarmup falhou:', e); }
+        try { renderLoadHistory(); } catch(e) { console.warn('renderLoadHistory falhou:', e); }
+
+        modalEl.classList.remove('hidden');
+    } catch (err) {
+        console.error('Erro em openLoadModal:', err);
+        showToast('Erro ao abrir carga. Veja o console.', true);
+    }
 }
 function closeLoadModal() {
-    document.getElementById('load-modal').classList.add('hidden');
+    const el = document.getElementById('load-modal');
+    if (el) el.classList.add('hidden');
     editingExerciseName = null;
     currentRIR = null;
 }
 function selectRIR(value) {
     currentRIR = value;
-    document.querySelectorAll('.rir-btn').forEach(btn => {
+    const btns = document.querySelectorAll('.rir-btn');
+    if (!btns.length) { console.warn('Nenhum .rir-btn encontrado'); return; }
+    btns.forEach(btn => {
         const rirNum = parseInt(btn.dataset.rir);
         const isSelected = value !== null && rirNum === value;
         if (isSelected) {
@@ -692,9 +712,15 @@ function computeWarmup(targetWeight) {
     ];
 }
 function saveLoad() {
-    const val = parseFloat(document.getElementById('load-input').value);
-    const note = document.getElementById('load-note-input').value.trim();
-    const goalVal = parseFloat(document.getElementById('load-goal-input').value);
+    const inputEl = document.getElementById('load-input');
+    const noteEl = document.getElementById('load-note-input');
+    const goalEl = document.getElementById('load-goal-input');
+    if (!inputEl) { showToast('Modal corrompido', true); return; }
+
+    const val = parseFloat(inputEl.value);
+    const note = noteEl ? noteEl.value.trim() : '';
+    const goalVal = goalEl ? parseFloat(goalEl.value) : NaN;
+
     if (isNaN(val) || val <= 0) { showToast("Digite uma carga válida", true); return; }
     if (!editingExerciseName) return;
 
@@ -774,7 +800,6 @@ function getProgressionSuggestion(exName) {
         return null;
     }
 }
-
 function getDeloadWarning(exName) {
     try {
         const arr = loadHistory[exName];
@@ -783,16 +808,13 @@ function getDeloadWarning(exName) {
         const sameLoad = last4.every(l => l.load === last4[0].load);
         const highEffort = last4.every(l => (l.rir ?? 2) <= 1);
         if (!sameLoad || !highEffort) return false;
-
         const oldest = last4[3];
         if (!oldest || typeof oldest.date !== 'string') return false;
         const parts = oldest.date.split('/');
         if (parts.length !== 2) return false;
-
         const day = parseInt(parts[0]);
         const month = parseInt(parts[1]) - 1;
         if (isNaN(day) || isNaN(month)) return false;
-
         const now = new Date();
         let year = now.getFullYear();
         if (month > now.getMonth()) year--;
